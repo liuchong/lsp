@@ -1,5 +1,8 @@
 #+TITLE: LSP
 #+AUTHOR: Liu Chong
+#+EMAIL: mail@clojure.cn
 #+DATE: <2012-05-20 18:51:00>
 
-Find some commend matched the word you enterd.
+Find some command matched the given words. 
+
+The"lsp" means list path, it's my very first program ever.

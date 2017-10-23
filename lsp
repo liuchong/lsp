@@ -2,8 +2,8 @@
 
 # A sub to print the help text as you will see an expect.
 sub print_help{
-	print "HELP FOR \"lspath\"\n"
-	    . "\t\tFind some commend matched the word you enterd.\n"
+	print "HELP FOR \"lsp\"\n"
+	    . "\t\tFind some command matched the given words.\n"
 	    . "\nOPTIONS:\n\t\tExcept -h and --help which will print"
 	    . " this help text,others will headed\n\t\tby \"/\",whi"
 	    . "ch symbol will not appear in a file name without the"
@@ -27,7 +27,7 @@ sub find_ls{
     my $finded;
     if ($_[0] && $_[1] ) {
 	my $dir_name = $_[0];
-# Fuck!
+# F**k!
 # This part is appearing for the metacharacters-stoping work.
 	my $got_name = join "\\.",split/\./,'0' . $_[1] . '0';
 	$got_name = join "\\+",split/\+/,$got_name;
@@ -35,7 +35,7 @@ sub find_ls{
 	$got_name = join "\\*",split/\*/,$got_name;
 	$got_name =~ s/^0(.*)0$/$1/;
 	$dir_name = $1 if ($dir_name =~ /(.*)\/$/);
-# Fuck!
+# F**k!
 	opendir DIR,$dir_name or warn"**ERROR**: $_[0] :$!\n";
 	chdir $dir_name or my $bad_dir = 1;
 	foreach my $file_name(readdir DIR) {
