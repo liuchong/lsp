@@ -6,3 +6,5 @@
 Find some command matched the given words. 
 
 The"lsp" means list path, it's my very first program ever.
+
+*** All Rights Reserved
