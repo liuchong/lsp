@@ -1,15 +1,21 @@
 #!/usr/bin/perl
 
+use Term::ANSIColor;
+
 # A sub to print the help text as you will see an expect.
-sub print_help{
+sub print_help {
     print "HELP FOR \"lsp\"\n"
         . "\t\tFind some command matched the given words.\n"
-        . "\nOPTIONS:\n\t\tExcept -h and --help which will print"
+        . "Usage:\n"
+        . "\t\tlsp [cmd cdm mcd ...] [OPTIONS]\n"
+        . "OPTIONS:\n"
+        . "\t\tExcept -h and --help which will print"
         . " this help text,others will headed\n\t\tby \"/\",whi"
         . "ch symbol will not appear in a file name without the"
-        . " path of\n\t\tparents directorys with \"/\".\n\n"
+        . " path of\n\t\tparents directorys with \"/\".\n"
+        . "\n"
         . "/P\t\tOnly search the path what you given behind.\n"
-        . "/AP\t\tAdd what you given to the search path.\n"
+        . "/A\t\tAppend what you given to the search path.\n"
         . "/s\t\tAlso search /sbin,/usr/sbin,/usr/local/sbin.\n"
         . "/p\t\tPrint PATH,also print the path after the sbins"
         . " added if the\n\t\toption /s was given.\n"
@@ -20,9 +26,18 @@ sub print_help{
     exit;
 }
 
+# Print string in color
+sub cprint {
+    if( $_[1]) {
+        print colored($_[0], $_[1]);
+    } else {
+        print $_[0];
+    }
+}
+
 # In each dir,this sub will work for you to print a line for each
 # matching file,and return ture if find an exact one.
-sub find_ls{
+sub find_ls {
     die "\"find_ls\" should not has a 5th arg!\n" if $_[4];
     my $finded;
     if ($_[0] && $_[1] ) {
@@ -36,14 +51,14 @@ sub find_ls{
         $got_name =~ s/^0(.*)0$/$1/;
         $dir_name = $1 if ($dir_name =~ /(.*)\/$/);
         # F**k!
-        opendir DIR,$dir_name or warn"**ERROR**: $_[0] :$!\n";
+        opendir DIR,$dir_name or warn"**ERROR** $_[0] $!\n";
         chdir $dir_name or my $bad_dir = 1;
         foreach my $file_name(readdir DIR) {
             if ($file_name =~ /$got_name/) {
                 if (!$_[2]) {
                     # While find a matching one,print it an try to show something
                     # for one to recognize the type of the file.
-                    print "  $dir_name/$file_name";
+                    print "$dir_name/$file_name";
                     print " @" if -l $file_name;
                     print " /" if -d $file_name;
                     print " *" if -x $file_name;
@@ -57,8 +72,10 @@ sub find_ls{
         }
         # For NO $_[4],it will be undef each time the sub runs,use it as mark.
         if (!$_[2] && $_[4]) {
-            print "Above is $_[4] matching in \"$dir_name\"\n"
-                . "^^^^^\n";
+            print "Above is $_[4] matching in [";
+            cprint("$dir_name/", "blue");
+            print "]\n";
+            print "^^^^^\n";
         }
         $finded = 1 if (!$bad_dir &&-e $_[1]);
     }
@@ -66,14 +83,16 @@ sub find_ls{
 }
 
 
-# Get the cmd an the option.
+# Get the cmd and the options.
 foreach (@ARGV) {
-    if (!$mark_P && !$mark_AP) {
+    # if /P or /A was given, all remainder strings will be treated as path
+    if (!$mark_P && !$mark_A) {
+        # parse the options
         if ($_ =~ /^\//) {
             if ($_ eq '/P') {
                 $mark_P = 1;
-            } elsif ($_ eq '/AP') {
-                $mark_AP = 1;
+            } elsif ($_ eq '/A') {
+                $mark_A = 1;
             } elsif ($_ eq '/s') {
                 $mark_s = 1;
             } elsif ($_ eq '/e') {
@@ -81,9 +100,9 @@ foreach (@ARGV) {
             } elsif ($_ eq '/p') {
                 $mark_p = 1;
             } elsif ($_ eq '/h') {
-                ++$argv_hash{'-h'};
+                ++$cmds_hash{'-h'};
             } elsif ($_ eq '//help') {
-                ++$argv_hash{'--help'};
+                ++$cmds_hash{'--help'};
             } else {
                 print "NO SUCH OPTION: $_\n\n";
                 print_help();
@@ -92,14 +111,15 @@ foreach (@ARGV) {
         } elsif ($_ eq '-h' || $_ eq '--help') {
             print_help();
         } else {
-            ++$argv_hash{$_};
+            # add the cmds
+            ++$cmds_hash{$_};
         }
     } else {
         $cur_path = $cur_path . ":" . $_;
     }
 }
 
-# Get path,is the /s option is given,add some "sbin" to it.
+# Get PATH, if the /s option is given, add some "sbin" into it.
 if (!$mark_P) {
     $cur_path = $cur_path . ":" . $ENV{'PATH'};
     $cur_path = '/sbin:/usr/sbin:/usr/local/sbin:' . $cur_path
@@ -113,12 +133,12 @@ if ($mark_p || !@ARGV) {
     print "********\n" if @ARGV;
 }
 
-$argv_hash = keys %argv_hash;
+$cmds_hash = keys %cmds_hash;
 
-foreach $cmd (keys %argv_hash) {
-    print "========$cmd========\n" if (keys %argv_hash > 1);
-    print "YOU ENTERED $argv_hash{$cmd} \"$cmd\"s,BUT ONLY USE ONCE:\n"
-        if ($argv_hash{$cmd} > 1 && (%argv_hash > 1 || !$mark_e));
+foreach $cmd (keys %cmds_hash) {
+    print "========$cmd========\n" if (keys %cmds_hash > 1);
+    print "YOU ENTERED $cmds_hash{$cmd} \"$cmd\"s,BUT ONLY USE ONCE:\n"
+        if ($cmds_hash{$cmd} > 1 && (%cmds_hash > 1 || !$mark_e));
     %dir_hash = ();
     $counter = 0;
     my %exact_match;
@@ -151,7 +171,9 @@ foreach $cmd (keys %argv_hash) {
     foreach (@sorted_keys) {
         $exact_match{$_} =~ s/(.*)\/$/$1/;
         if (!$mark_e) {
-            print "   FIND AN EXACT ONE IN [$exact_match{$_}]:\n";
+            cprint("FIND AN EXACT ONE IN [", "bold");
+            cprint("$exact_match{$_}/", "bold blue");
+            cprint("]:\n", "bold");
         } else {
             print "[$exact_match{$_}]:\n";
         }
@@ -189,8 +211,8 @@ foreach $cmd (keys %argv_hash) {
     }
     if ($using_cmd) {
         print "You Are Using:\n";
-        print "$using_cmd\n";
+        cprint("$using_cmd\n", "bold green");
     }
-    --$argv_hash;
-    print "\n" if $argv_hash > 0;
+    --$cmds_hash;
+    print "\n" if $cmds_hash > 0;
 }
