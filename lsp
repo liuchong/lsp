@@ -182,7 +182,7 @@ foreach $cmd (keys %cmds_hash) {
             && (-f $exact_cmd || -l $exact_cmd)) {
             $using_cmd = $exact_cmd;
         }
-        print "$exact_cmd\n";
+        print "$exact_cmd";
         while (-l $exact_cmd) {
             if ($exact_cmd =~ /(.*\/)(.+)/) {
                 $cmd_dir = $1;
@@ -202,8 +202,10 @@ foreach $cmd (keys %cmds_hash) {
                 }
                 $exact_cmd .= $end;
             }
-            print "$exact_cmd\n";
+            print " -> $exact_cmd\n";
+            print "$exact_cmd";
         }
+        print "\n";
         if (-d $exact_cmd && $_ == $find_using_times) {
             ++$find_using_times;
             $using_cmd = undef;
