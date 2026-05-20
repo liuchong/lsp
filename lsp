@@ -1,8 +1,15 @@
 #!/usr/bin/perl
 
-use Term::ANSIColor;
+use strict;
+use warnings;
+use Cwd qw(getcwd);
+use Fcntl ':mode';
+use Term::ANSIColor qw(colored);
 
-# A sub to print the help text as you will see an expect.
+our $COLOR_ENABLED = 0;
+our %ANSI_BY_KEY;
+our %ANSI_BY_EXT;
+
 sub print_help {
     print "HELP FOR \"lsp\"\n"
         . "\t\tFind some command matched the given words.\n"
@@ -20,141 +27,527 @@ sub print_help {
         . "/p\t\tPrint PATH,also print the path after the sbins"
         . " added if the\n\t\toption /s was given.\n"
         . "/e\t\tExactly match will be printed while others not.\n"
+        . "/l\t\tPrint matches in a pure Perl long format.\n"
         . "/h\t\t\"/h\" take place of \"-h\" as above.\n"
         . "//help\t\t\"//help\"take place of \"--help\" as above.\n"
         . "-h,--help\tDisplay this help list.\n";
     exit;
 }
 
-# Print string in color
 sub cprint {
-    if( $_[1]) {
-        print colored($_[0], $_[1]);
+    my ($text, $color) = @_;
+
+    if ($color && $COLOR_ENABLED) {
+        print colored($text, $color);
     } else {
-        print $_[0];
+        print $text;
     }
 }
 
-# In each dir,this sub will work for you to print a line for each
-# matching file,and return ture if find an exact one.
+sub terminal_supports_color {
+    return 0 if exists $ENV{'NO_COLOR'} && $ENV{'NO_COLOR'} ne '';
+    return 1 if defined $ENV{'CLICOLOR_FORCE'} && $ENV{'CLICOLOR_FORCE'} ne '0';
+    return 0 if defined $ENV{'CLICOLOR'} && $ENV{'CLICOLOR'} eq '0';
+    return 0 if !-t STDOUT;
+
+    my $term = $ENV{'TERM'} || '';
+    return 1 if defined $ENV{'COLORTERM'} && $ENV{'COLORTERM'} ne '';
+    return 0 if $term eq '' || $term eq 'dumb';
+
+    return 1;
+}
+
+sub default_ls_colors {
+    return (
+        bd => '01;33',
+        cd => '01;33',
+        di => '01;34',
+        ex => '01;32',
+        ln => '01;36',
+        or => '01;31',
+        ow => '34;42',
+        pi => '33',
+        sg => '30;43',
+        so => '01;35',
+        st => '37;44',
+        su => '37;41',
+        tw => '30;42',
+        '*.7z'  => '01;31',
+        '*.bz2' => '01;31',
+        '*.gz'  => '01;31',
+        '*.tar' => '01;31',
+        '*.tbz' => '01;31',
+        '*.tgz' => '01;31',
+        '*.xz'  => '01;31',
+        '*.zip' => '01;31',
+        '*.gif' => '01;35',
+        '*.jpeg' => '01;35',
+        '*.jpg' => '01;35',
+        '*.png' => '01;35',
+        '*.svg' => '01;35',
+        '*.webp' => '01;35',
+        '*.mov' => '01;35',
+        '*.mp4' => '01;35',
+        '*.webm' => '01;35',
+        '*.flac' => '00;36',
+        '*.m4a' => '00;36',
+        '*.mp3' => '00;36',
+        '*.ogg' => '00;36',
+        '*.wav' => '00;36',
+    );
+}
+
+sub parse_gnu_ls_colors {
+    my ($value) = @_;
+    my (%by_key, %by_ext);
+
+    for my $item (split /:/, ($value || '')) {
+        next if $item !~ /\A([^=]+)=(.*)\z/;
+
+        my ($key, $ansi) = ($1, $2);
+        next if $ansi eq '';
+        next if $ansi !~ /\A[0-9;]+\z/;
+
+        if ($key =~ /\A\*(.+)\z/) {
+            $by_ext{lc $1} = $ansi;
+        } else {
+            $by_key{$key} = $ansi;
+        }
+    }
+
+    return (\%by_key, \%by_ext);
+}
+
+sub lscolors_code_to_ansi {
+    my ($char, $is_background) = @_;
+    return if !defined $char || $char eq 'x' || $char eq 'X';
+
+    my $lower = lc $char;
+    my %base = (
+        a => 0,
+        b => 1,
+        c => 2,
+        d => 3,
+        e => 4,
+        f => 5,
+        g => 6,
+        h => 7,
+    );
+    return if !exists $base{$lower};
+
+    my $code = ($is_background ? 40 : 30) + $base{$lower};
+    return $is_background || $char eq $lower ? "$code" : "01;$code";
+}
+
+sub parse_bsd_lscolors {
+    my ($value) = @_;
+    my %by_key;
+    my @keys = qw(di ln so pi ex bd cd su sg tw ow);
+    $value = substr(($value || '') . ('x' x 22), 0, 22);
+
+    for my $i (0 .. $#keys) {
+        my $fg = substr $value, $i * 2, 1;
+        my $bg = substr $value, $i * 2 + 1, 1;
+        my @ansi = grep { defined && $_ ne '' } (
+            lscolors_code_to_ansi($fg, 0),
+            lscolors_code_to_ansi($bg, 1),
+        );
+        $by_key{$keys[$i]} = join ';', @ansi if @ansi;
+    }
+
+    return %by_key;
+}
+
+sub setup_colors {
+    my (%by_key, %by_ext);
+
+    my %defaults = default_ls_colors();
+    for my $key (keys %defaults) {
+        if ($key =~ /\A\*(.+)\z/) {
+            $by_ext{lc $1} = $defaults{$key};
+        } else {
+            $by_key{$key} = $defaults{$key};
+        }
+    }
+
+    if (defined $ENV{'LSCOLORS'} && !defined $ENV{'LS_COLORS'}) {
+        my %bsd_colors = parse_bsd_lscolors($ENV{'LSCOLORS'});
+        @by_key{keys %bsd_colors} = values %bsd_colors;
+    }
+
+    if (defined $ENV{'LS_COLORS'}) {
+        my ($gnu_keys, $gnu_exts) = parse_gnu_ls_colors($ENV{'LS_COLORS'});
+        @by_key{keys %{$gnu_keys}} = values %{$gnu_keys};
+        @by_ext{keys %{$gnu_exts}} = values %{$gnu_exts};
+    }
+
+    return (\%by_key, \%by_ext);
+}
+
+sub ansi_wrap {
+    my ($text, $ansi) = @_;
+    return $text if !$COLOR_ENABLED || !defined $ansi || $ansi eq '' || $ansi eq '00' || $ansi eq '0';
+
+    return "\e[${ansi}m$text\e[0m";
+}
+
+sub clean_path {
+    my ($path) = @_;
+    return $path if !defined $path || $path eq '';
+
+    my $is_absolute = $path =~ m{^/};
+    my @parts;
+
+    for my $part (split m{/+}, $path) {
+        next if $part eq '' || $part eq '.';
+
+        if ($part eq '..') {
+            if (@parts && $parts[-1] ne '..') {
+                pop @parts;
+            } elsif (!$is_absolute) {
+                push @parts, $part;
+            }
+            next;
+        }
+
+        push @parts, $part;
+    }
+
+    my $cleaned = join '/', @parts;
+    return $is_absolute ? "/$cleaned" : ($cleaned || '.');
+}
+
+sub normalize_search_path {
+    my ($path, $pwd) = @_;
+    return if !defined $path || $path eq '';
+
+    $path = $pwd if $path eq '.';
+    $path = "$pwd/$path" if $path !~ m{^/};
+    $path =~ s{/+\z}{};
+
+    return $path eq '' ? '/' : $path;
+}
+
+sub file_type_char {
+    my ($mode) = @_;
+
+    return 'l' if S_ISLNK($mode);
+    return 'd' if S_ISDIR($mode);
+    return 'c' if S_ISCHR($mode);
+    return 'b' if S_ISBLK($mode);
+    return 'p' if S_ISFIFO($mode);
+    return 's' if S_ISSOCK($mode);
+    return '-';
+}
+
+sub permission_char {
+    my ($mode, $bit, $special_bit, $regular_char, $special_char, $missing_special_char) = @_;
+
+    my $has_bit = $mode & $bit;
+    my $has_special = $mode & $special_bit;
+
+    return $special_char if $has_bit && $has_special;
+    return $missing_special_char if !$has_bit && $has_special;
+    return $regular_char if $has_bit;
+    return '-';
+}
+
+sub format_permissions {
+    my ($mode) = @_;
+
+    return file_type_char($mode)
+        . (($mode & S_IRUSR) ? 'r' : '-')
+        . (($mode & S_IWUSR) ? 'w' : '-')
+        . permission_char($mode, S_IXUSR, S_ISUID, 'x', 's', 'S')
+        . (($mode & S_IRGRP) ? 'r' : '-')
+        . (($mode & S_IWGRP) ? 'w' : '-')
+        . permission_char($mode, S_IXGRP, S_ISGID, 'x', 's', 'S')
+        . (($mode & S_IROTH) ? 'r' : '-')
+        . (($mode & S_IWOTH) ? 'w' : '-')
+        . permission_char($mode, S_IXOTH, S_ISVTX, 'x', 't', 'T');
+}
+
+sub format_time {
+    my ($epoch) = @_;
+    my @months = qw(Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec);
+    my (undef, $min, $hour, $mday, $mon) = localtime $epoch;
+
+    return sprintf "%s %2d %02d:%02d", $months[$mon], $mday, $hour, $min;
+}
+
+sub file_type_description {
+    my ($path) = @_;
+    my @stat = lstat $path;
+    return "unreadable\n" if !@stat;
+
+    my $mode = $stat[2];
+    return "symbolic link\n" if S_ISLNK($mode);
+    return "directory\n" if S_ISDIR($mode);
+    return "executable file\n" if S_ISREG($mode) && -x $path;
+    return "regular file\n" if S_ISREG($mode);
+    return "character special file\n" if S_ISCHR($mode);
+    return "block special file\n" if S_ISBLK($mode);
+    return "fifo\n" if S_ISFIFO($mode);
+    return "socket\n" if S_ISSOCK($mode);
+    return "unknown\n";
+}
+
+sub color_key_for_path {
+    my ($path) = @_;
+    my @stat = lstat $path;
+    return 'mi' if !@stat;
+
+    my $mode = $stat[2];
+
+    if (S_ISLNK($mode)) {
+        return -e $path ? 'ln' : 'or';
+    }
+
+    if (S_ISDIR($mode)) {
+        return 'tw' if ($mode & S_IWOTH) && ($mode & S_ISVTX);
+        return 'ow' if $mode & S_IWOTH;
+        return 'st' if $mode & S_ISVTX;
+        return 'di';
+    }
+
+    return 'pi' if S_ISFIFO($mode);
+    return 'so' if S_ISSOCK($mode);
+    return 'bd' if S_ISBLK($mode);
+    return 'cd' if S_ISCHR($mode);
+    return 'su' if S_ISREG($mode) && ($mode & S_ISUID);
+    return 'sg' if S_ISREG($mode) && ($mode & S_ISGID);
+    return 'ex' if S_ISREG($mode) && -x $path;
+
+    return '';
+}
+
+sub extension_color_for_path {
+    my ($path) = @_;
+    my $name = lc $path;
+
+    for my $suffix (sort { length($b) <=> length($a) } keys %ANSI_BY_EXT) {
+        return $ANSI_BY_EXT{$suffix} if substr($name, -length($suffix)) eq $suffix;
+    }
+
+    return;
+}
+
+sub color_for_path {
+    my ($path) = @_;
+    my $key = color_key_for_path($path);
+
+    return $ANSI_BY_KEY{$key} if $key && exists $ANSI_BY_KEY{$key};
+    return extension_color_for_path($path);
+}
+
+sub display_path {
+    my ($display, $path) = @_;
+
+    return ansi_wrap($display, color_for_path($path));
+}
+
+sub resolve_link_target_path {
+    my ($path, $target) = @_;
+    return if !defined $target;
+    return clean_path($target) if $target =~ m{^/};
+
+    my $dir = $path;
+    $dir =~ s{/[^/]+\z}{/};
+    return clean_path("$dir$target");
+}
+
+sub print_match_long {
+    my ($path) = @_;
+    my @stat = lstat $path;
+
+    if (!@stat) {
+        warn "**ERROR** $path $!\n";
+        return;
+    }
+
+    my ($mode, $nlink, $uid, $gid, $size, $mtime) = @stat[2, 3, 4, 5, 7, 9];
+    my $owner = getpwuid $uid;
+    my $group = getgrgid $gid;
+    $owner = $uid if !defined $owner;
+    $group = $gid if !defined $group;
+
+    printf "%s %3d %-8s %-8s %8d %s %s",
+        format_permissions($mode),
+        $nlink,
+        $owner,
+        $group,
+        $size,
+        format_time($mtime),
+        display_path($path, $path);
+
+    my $target = readlink $path if S_ISLNK($mode);
+    if (defined $target) {
+        my $target_path = resolve_link_target_path($path, $target);
+        print " -> ";
+        print display_path($target, $target_path);
+    }
+    print "\n";
+}
+
+sub print_match {
+    my ($dir_name, $file_name, $long_format) = @_;
+    my $path = "$dir_name/$file_name";
+
+    if ($long_format) {
+        print_match_long($path);
+    } else {
+        print display_path($path, $path);
+        print " @" if -l $path;
+        print " /" if -d $path;
+        print " *" if -x $path;
+        print "\n";
+    }
+}
+
 sub find_ls {
-    die "\"find_ls\" should not has a 5th arg!\n" if $_[4];
-    my $finded;
-    if ($_[0] && $_[1] ) {
-        my $dir_name = $_[0];
-        # F**k!
-        # This part is appearing for the metacharacters-stoping work.
-        my $got_name = join "\\.",split/\./,'0' . $_[1] . '0';
-        $got_name = join "\\+",split/\+/,$got_name;
-        $got_name = join "\\?",split/\?/,$got_name;
-        $got_name = join "\\*",split/\*/,$got_name;
-        $got_name =~ s/^0(.*)0$/$1/;
-        $dir_name = $1 if ($dir_name =~ /(.*)\/$/);
-        # F**k!
-        opendir DIR,$dir_name or warn"**ERROR** $_[0] $!\n";
-        chdir $dir_name or my $bad_dir = 1;
-        foreach my $file_name(readdir DIR) {
-            if ($file_name =~ /$got_name/) {
-                if (!$_[2]) {
-                    # While find a matching one,print it an try to show something
-                    # for one to recognize the type of the file.
-                    print "$dir_name/$file_name";
-                    print " @" if -l $file_name;
-                    print " /" if -d $file_name;
-                    print " *" if -x $file_name;
-                    print "\n";
-                    # This is a "tmp" number,see below.
-                    ++$_[4];
-                }
-                # A total counter for each cmd which you ara finding.
-                ++$_[3];
-            }
-        }
-        # For NO $_[4],it will be undef each time the sub runs,use it as mark.
-        if (!$_[2] && $_[4]) {
-            print "Above is $_[4] matching in [";
-            cprint("$dir_name/", "blue");
-            print "]\n";
-            print "^^^^^\n";
-        }
-        $finded = 1 if (!$bad_dir &&-e $_[1]);
+    my ($dir_name, $wanted_name, $exact_only, $long_format) = @_;
+    return (0, 0) if !$dir_name || !defined $wanted_name;
+
+    my $dir_handle;
+    if (!opendir $dir_handle, $dir_name) {
+        warn "**ERROR** $dir_name $!\n";
+        return (0, 0);
     }
-    $finded;
+
+    my $matches = 0;
+    my $printed = 0;
+
+    while (defined(my $file_name = readdir $dir_handle)) {
+        next if index($file_name, $wanted_name) == -1;
+
+        ++$matches;
+        if (!$exact_only) {
+            print_match($dir_name, $file_name, $long_format);
+            ++$printed;
+        }
+    }
+
+    closedir $dir_handle;
+
+    if (!$exact_only && $printed) {
+        print "Above is $printed matching in [";
+        cprint("$dir_name/", "blue");
+        print "]\n";
+        print "^^^^^\n";
+    }
+
+    return ($matches, -e "$dir_name/$wanted_name" ? 1 : 0);
 }
 
+sub resolve_symlink_chain {
+    my ($path) = @_;
+    my @targets;
+    my %seen;
 
-# Get the cmd and the options.
-foreach (@ARGV) {
-    # if /P or /A was given, all remainder strings will be treated as path
+    while (-l $path) {
+        last if $seen{$path}++;
+
+        my $target = readlink $path;
+        last if !defined $target;
+
+        if ($target !~ m{^/}) {
+            my $dir = $path;
+            $dir =~ s{/[^/]+\z}{/};
+            $target = "$dir$target";
+        }
+
+        $target = clean_path($target);
+        push @targets, $target;
+        $path = $target;
+    }
+
+    return ($path, @targets);
+}
+
+sub is_runnable_command {
+    my ($path) = @_;
+    return -f $path && -x $path;
+}
+
+($COLOR_ENABLED, my $color_by_key, my $color_by_ext) = (
+    terminal_supports_color(),
+    setup_colors(),
+);
+%ANSI_BY_KEY = %{$color_by_key};
+%ANSI_BY_EXT = %{$color_by_ext};
+
+my %cmds_hash;
+my @cmds;
+my @extra_paths;
+my ($mark_P, $mark_A, $mark_s, $mark_e, $mark_l, $mark_p);
+
+for my $arg (@ARGV) {
     if (!$mark_P && !$mark_A) {
-        # parse the options
-        if ($_ =~ /^\//) {
-            if ($_ eq '/P') {
+        if ($arg =~ m{^/}) {
+            if ($arg eq '/P') {
                 $mark_P = 1;
-            } elsif ($_ eq '/A') {
+            } elsif ($arg eq '/A') {
                 $mark_A = 1;
-            } elsif ($_ eq '/s') {
+            } elsif ($arg eq '/s') {
                 $mark_s = 1;
-            } elsif ($_ eq '/e') {
+            } elsif ($arg eq '/e') {
                 $mark_e = 1;
-            } elsif ($_ eq '/p') {
+            } elsif ($arg eq '/l') {
+                $mark_l = 1;
+            } elsif ($arg eq '/p') {
                 $mark_p = 1;
-            } elsif ($_ eq '/h') {
-                ++$cmds_hash{'-h'};
-            } elsif ($_ eq '//help') {
-                ++$cmds_hash{'--help'};
-            } else {
-                print "NO SUCH OPTION: $_\n\n";
+            } elsif ($arg eq '/h' || $arg eq '//help') {
                 print_help();
-                die "\n";
+            } else {
+                print "NO SUCH OPTION: $arg\n\n";
+                print_help();
             }
-        } elsif ($_ eq '-h' || $_ eq '--help') {
+        } elsif ($arg eq '-h' || $arg eq '--help') {
             print_help();
         } else {
-            # add the cmds
-            ++$cmds_hash{$_};
+            push @cmds, $arg if !$cmds_hash{$arg};
+            ++$cmds_hash{$arg};
         }
     } else {
-        $cur_path = $cur_path . ":" . $_;
+        push @extra_paths, $arg;
     }
 }
 
-# Get PATH, if the /s option is given, add some "sbin" into it.
+my @search_paths = @extra_paths;
 if (!$mark_P) {
-    $cur_path = $cur_path . ":" . $ENV{'PATH'};
-    $cur_path = '/sbin:/usr/sbin:/usr/local/sbin:' . $cur_path
-        if $mark_s;
+    push @search_paths, split /:/, ($ENV{'PATH'} || '');
+    unshift @search_paths, qw(/sbin /usr/sbin /usr/local/sbin) if $mark_s;
 }
 
+my $cur_path = join ':', @search_paths;
 if ($mark_p || !@ARGV) {
     print "********\n" if @ARGV;
-    print "$ENV{'PATH'}\n";
+    print ($ENV{'PATH'} || '');
+    print "\n";
     print "********\n$cur_path\n" if $mark_s;
     print "********\n" if @ARGV;
 }
 
-$cmds_hash = keys %cmds_hash;
+my $pwd = $ENV{'PWD'} || getcwd();
+my $cmds_left = scalar @cmds;
 
-foreach $cmd (keys %cmds_hash) {
-    print "========$cmd========\n" if (keys %cmds_hash > 1);
+for my $cmd (@cmds) {
+    print "========$cmd========\n" if @cmds > 1;
     print "YOU ENTERED $cmds_hash{$cmd} \"$cmd\"s,BUT ONLY USE ONCE:\n"
-        if ($cmds_hash{$cmd} > 1 && (%cmds_hash > 1 || !$mark_e));
-    %dir_hash = ();
-    $counter = 0;
-    my %exact_match;
-    # Above,or %exact_match = (); () should not be {} which will not work.
-    $time_counter = 0;
-    foreach $this_path (split/:/,$cur_path) {
-        if ($this_path eq '.') {
-            $this_path = $ENV{'PWD'}
-        } elsif ($this_path) {
-            $this_path = $ENV{'PWD'} . "/" . $this_path
-                unless $this_path =~ /^\//;
-        }
-        $this_path =~ s/(.*)\/$/$1/;
-        my $finded = find_ls($this_path,$cmd,$mark_e,$counter)
-            if (++$dir_hash{$this_path} == 1);
-        $exact_match{$this_path} = ++$time_counter if $finded;
+        if $cmds_hash{$cmd} > 1 && (@cmds > 1 || !$mark_e);
+
+    my %dir_hash;
+    my $counter = 0;
+    my @exact_matches;
+
+    for my $path (@search_paths) {
+        my $this_path = normalize_search_path($path, $pwd);
+        next if !defined $this_path;
+        next if ++$dir_hash{$this_path} > 1;
+
+        my ($matches, $exact_match) = find_ls($this_path, $cmd, $mark_e, $mark_l);
+        $counter += $matches;
+        push @exact_matches, $this_path if $exact_match;
     }
 
     if ($counter) {
@@ -165,56 +558,50 @@ foreach $cmd (keys %cmds_hash) {
     }
 
     my $using_cmd;
-    my $find_using_times = 1;
-    %exact_match = reverse %exact_match if %exact_match;
-    my @sorted_keys = sort(keys %exact_match);
-    foreach (@sorted_keys) {
-        $exact_match{$_} =~ s/(.*)\/$/$1/;
+    for my $path (@exact_matches) {
         if (!$mark_e) {
             cprint("FIND AN EXACT ONE IN [", "bold");
-            cprint("$exact_match{$_}/", "bold blue");
+            cprint("$path/", "bold blue");
             cprint("]:\n", "bold");
         } else {
-            print "[$exact_match{$_}]:\n";
+            print "[$path]:\n";
         }
-        my $exact_cmd = "$exact_match{$_}/$cmd";
-        if ($_ == $find_using_times
-            && (-f $exact_cmd || -l $exact_cmd)) {
-            $using_cmd = $exact_cmd;
+
+        my $exact_cmd = "$path/$cmd";
+        $using_cmd = $exact_cmd
+            if !defined $using_cmd && is_runnable_command($exact_cmd);
+
+        if ($mark_l) {
+            print_match_long($exact_cmd);
+        } else {
+            print display_path($exact_cmd, $exact_cmd);
         }
-        print "$exact_cmd";
-        while (-l $exact_cmd) {
-            if ($exact_cmd =~ /(.*\/)(.+)/) {
-                $cmd_dir = $1;
+        my (undef, @symlink_targets) = resolve_symlink_chain($exact_cmd);
+        for my $target (@symlink_targets) {
+            if ($mark_l) {
+                print_match_long($target);
+            } else {
+                print " -> ";
+                print display_path($target, $target);
+                print "\n";
+                print display_path($target, $target);
             }
-            $exact_cmd = readlink "$exact_cmd";
-            unless ($exact_cmd =~ /^\/.*/) {
-                $exact_cmd = "$cmd_dir$exact_cmd";
-            }
-            while ($exact_cmd =~ /(.*?)\/[.]([.]?)(\/.*)/) {
-                my $head = $1;
-                $exact_cmd = $head;
-                my $end = $3;
-                if ($2) {
-                    if ($head =~ /(.*)\/.*/) {
-                        $exact_cmd = $1;
-                    }
-                }
-                $exact_cmd .= $end;
-            }
-            print " -> $exact_cmd\n";
-            print "$exact_cmd";
         }
-        print "\n";
-        if (-d $exact_cmd && $_ == $find_using_times) {
-            ++$find_using_times;
-            $using_cmd = undef;
-        }
+        print "\n" if !$mark_l;
     }
+
     if ($using_cmd) {
         print "You Are Using:\n";
-        cprint("$using_cmd\n", "bold green");
+        if ($mark_l) {
+            print_match_long($using_cmd);
+            print "FILE TYPE : ";
+            print file_type_description($using_cmd);
+        } else {
+            print display_path($using_cmd, $using_cmd);
+            print "\n";
+        }
     }
-    --$cmds_hash;
-    print "\n" if $cmds_hash > 0;
+
+    --$cmds_left;
+    print "\n" if $cmds_left > 0;
 }
