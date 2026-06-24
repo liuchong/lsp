@@ -521,12 +521,63 @@ sub process_matches {
     return 0;
 }
 
-sub highlight_match {
-    my ($text, $wanted_name) = @_;
-    return $text if !$COLOR_ENABLED || !defined $wanted_name || $wanted_name eq '';
+sub resolve_command_in_path {
+    my ($name) = @_;
+    return if !defined $name || $name eq '' || $name =~ m{/};
 
-    $text =~ s/(\Q$wanted_name\E)/ansi_wrap($1, '01;31')/ge;
-    return $text;
+    for my $dir (split /:/, ($ENV{'PATH'} || '')) {
+        next if $dir eq '';
+        my $path = "$dir/$name";
+        return $path if is_runnable_command($path);
+    }
+
+    return;
+}
+
+sub command_line_program {
+    my ($text) = @_;
+    return ('', undef, '') if !defined $text || $text eq '';
+
+    if ($text =~ m{\A/}) {
+        my $best;
+        my $offset = -1;
+        while (($offset = index($text, ' ', $offset + 1)) != -1) {
+            my $candidate = substr $text, 0, $offset;
+            $best = $candidate if is_runnable_command($candidate);
+        }
+        $best = $text if is_runnable_command($text);
+
+        if (defined $best) {
+            return ($best, $best, substr($text, length($best)));
+        }
+    }
+
+    my ($program, $rest) = $text =~ /\A(\S+)(.*)\z/;
+    $program = '' if !defined $program;
+    $rest = '' if !defined $rest;
+
+    return ($program, resolve_command_in_path($program), $rest);
+}
+
+sub highlight_match {
+    my ($text, $wanted_name, $plain_color) = @_;
+    return $text if !$COLOR_ENABLED || !defined $text || $text eq '';
+    return ansi_wrap($text, $plain_color) if !defined $wanted_name || $wanted_name eq '';
+
+    my @parts = split /(\Q$wanted_name\E)/, $text;
+    return join '', map {
+        $_ eq $wanted_name ? ansi_wrap($_, '01;31') : ansi_wrap($_, $plain_color)
+    } @parts;
+}
+
+sub format_process_command_line {
+    my ($process, $wanted_name) = @_;
+    my ($program, $program_path, $rest) = command_line_program($process->{text});
+    my $formatted_program = defined $program_path
+        ? display_path($program, $program_path)
+        : highlight_match($program, $wanted_name, '');
+
+    return $formatted_program . highlight_match($rest, $wanted_name, '02');
 }
 
 sub print_process_header {
@@ -547,7 +598,7 @@ sub print_process_match {
     my $name_width = $long_format ? 32 : 20;
     my $pid = sprintf "%8s", $process->{pid};
     my $name = sprintf "%-${name_width}s", $process->{name};
-    my $command_line = highlight_match($process->{text}, $wanted_name);
+    my $command_line = format_process_command_line($process, $wanted_name);
 
     print ansi_wrap($pid, '01;36');
     print "  ";

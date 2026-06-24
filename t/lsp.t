@@ -103,6 +103,8 @@ make_executable("$bin/lsp-test-command");
     unlike $output, qr/NO SUCH OPTION/, '/ps is accepted as an option';
     is $color_exit, 0, '/ps works when terminal colors are forced';
     like $color_output, qr/\e\[[0-9;]+m/, '/ps prints ANSI colors when terminal colors are enabled';
+    like $color_output, qr/\e\[[0-9;]+m\Q$^X\E\e\[0m/, '/ps colors the executable path like PATH matches';
+    like $color_output, qr/\e\[01;31m\Q$marker\E\e\[0m/, '/ps highlights the matched process text';
 }
 
 {
