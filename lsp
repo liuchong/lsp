@@ -26,12 +26,21 @@ sub print_help {
         . "/s\t\tAlso search /sbin,/usr/sbin,/usr/local/sbin.\n"
         . "/p\t\tPrint PATH,also print the path after the sbins"
         . " added if the\n\t\toption /s was given.\n"
+        . "/path\t\tSearch commands in PATH. This is the default mode.\n"
+        . "/ps\t\tSearch running process command lines.\n"
         . "/e\t\tExactly match will be printed while others not.\n"
         . "/l\t\tPrint matches in a pure Perl long format.\n"
         . "/h\t\t\"/h\" take place of \"-h\" as above.\n"
         . "//help\t\t\"//help\"take place of \"--help\" as above.\n"
         . "-h,--help\tDisplay this help list.\n";
     exit;
+}
+
+sub usage_error {
+    my ($message) = @_;
+    print "$message\n\n";
+    print "Run lsp --help for usage.\n";
+    exit 2;
 }
 
 sub cprint {
@@ -469,6 +478,121 @@ sub is_runnable_command {
     return -f $path && -x $path;
 }
 
+sub running_processes {
+    my @processes;
+
+    my $ps_handle;
+    if (!open $ps_handle, '-|', 'ps', '-axo', 'pid=,ucomm=,command=') {
+        warn "**ERROR** ps $!\n";
+        return @processes;
+    }
+
+    while (defined(my $line = <$ps_handle>)) {
+        chomp $line;
+        next if $line !~ /\A\s*(\d+)\s+(.{16})\s+(.*)\z/;
+
+        my ($pid, $name, $command_line) = ($1, $2, $3);
+        $name =~ s/\s+\z//;
+        push @processes, {
+            pid  => $pid,
+            name => $name,
+            text => $command_line,
+        };
+    }
+
+    close $ps_handle;
+    return @processes;
+}
+
+sub process_matches {
+    my ($process, $wanted_name, $exact_only) = @_;
+    return 0 if !defined $wanted_name || $wanted_name eq '';
+
+    my @candidates = (
+        $process->{text},
+        $process->{name},
+    );
+
+    for my $candidate (@candidates) {
+        next if !defined $candidate;
+        return 1 if $exact_only ? $candidate eq $wanted_name : index($candidate, $wanted_name) >= 0;
+    }
+
+    return 0;
+}
+
+sub highlight_match {
+    my ($text, $wanted_name) = @_;
+    return $text if !$COLOR_ENABLED || !defined $wanted_name || $wanted_name eq '';
+
+    $text =~ s/(\Q$wanted_name\E)/ansi_wrap($1, '01;31')/ge;
+    return $text;
+}
+
+sub print_process_header {
+    my ($name_width) = @_;
+    my $pid = sprintf "%8s", 'PID';
+    my $name = sprintf "%-${name_width}s", 'COMMAND';
+
+    print ansi_wrap($pid, '01;36');
+    print "  ";
+    print ansi_wrap($name, '01;32');
+    print "  ";
+    print ansi_wrap('CMDLINE', '01;34');
+    print "\n";
+}
+
+sub print_process_match {
+    my ($process, $long_format, $wanted_name) = @_;
+    my $name_width = $long_format ? 32 : 20;
+    my $pid = sprintf "%8s", $process->{pid};
+    my $name = sprintf "%-${name_width}s", $process->{name};
+    my $command_line = highlight_match($process->{text}, $wanted_name);
+
+    print ansi_wrap($pid, '01;36');
+    print "  ";
+    print ansi_wrap($name, '01;32');
+    print "  ";
+    print $command_line;
+    print "\n";
+}
+
+sub search_processes {
+    my ($cmds, $cmds_hash, $exact_only, $long_format) = @_;
+    my @processes = running_processes();
+    my $cmds_left = scalar @{$cmds};
+
+    for my $cmd (@{$cmds}) {
+        print "========$cmd========\n" if @{$cmds} > 1;
+        print "YOU ENTERED $cmds_hash->{$cmd} \"$cmd\"s,BUT ONLY USE ONCE:\n"
+            if $cmds_hash->{$cmd} > 1 && (@{$cmds} > 1 || !$exact_only);
+
+        my @matches;
+        for my $process (@processes) {
+            next if !process_matches($process, $cmd, $exact_only);
+            push @matches, $process;
+        }
+
+        my $counter = scalar @matches;
+        if ($counter) {
+            print_process_header($long_format ? 32 : 20);
+            for my $process (@matches) {
+                print_process_match($process, $long_format, $cmd);
+            }
+        }
+
+        if ($counter) {
+            print "--------\n^_^ FINDED $counter MATCHING PROCESS \"$cmd\"! ^_^\n"
+                if !$exact_only;
+        } else {
+            print "--------\n!!!! NONE MATCHING PROCESS \"$cmd\" !!!!\n";
+        }
+
+        --$cmds_left;
+        print "\n" if $cmds_left > 0;
+    }
+}
+
 ($COLOR_ENABLED, my $color_by_key, my $color_by_ext) = (
     terminal_supports_color(),
     setup_colors(),
@@ -479,7 +603,7 @@ sub is_runnable_command {
 my %cmds_hash;
 my @cmds;
 my @extra_paths;
-my ($mark_P, $mark_A, $mark_s, $mark_e, $mark_l, $mark_p);
+my ($mark_P, $mark_A, $mark_s, $mark_e, $mark_l, $mark_p, $mark_path, $mark_ps);
 
 for my $arg (@ARGV) {
     if (!$mark_P && !$mark_A) {
@@ -496,6 +620,10 @@ for my $arg (@ARGV) {
                 $mark_l = 1;
             } elsif ($arg eq '/p') {
                 $mark_p = 1;
+            } elsif ($arg eq '/path') {
+                $mark_path = 1;
+            } elsif ($arg eq '/ps') {
+                $mark_ps = 1;
             } elsif ($arg eq '/h' || $arg eq '//help') {
                 print_help();
             } else {
@@ -511,6 +639,15 @@ for my $arg (@ARGV) {
     } else {
         push @extra_paths, $arg;
     }
+}
+
+usage_error('Cannot combine /path and /ps') if $mark_path && $mark_ps;
+usage_error('Cannot combine /ps with PATH-only options /P, /A, /s, or /p')
+    if $mark_ps && ($mark_P || $mark_A || $mark_s || $mark_p);
+
+if ($mark_ps) {
+    search_processes(\@cmds, \%cmds_hash, $mark_e, $mark_l);
+    exit;
 }
 
 my @search_paths = @extra_paths;

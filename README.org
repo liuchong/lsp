@@ -7,4 +7,10 @@ Find some command matched the given words.
 
 The"lsp" means list path, it's my very first program ever.
 
+* Usage
+
+- =lsp word= searches commands in =PATH= by default.
+- =lsp word /path= explicitly searches commands in =PATH=.
+- =lsp word /ps= searches running process command lines.
+
 *** All Rights Reserved
